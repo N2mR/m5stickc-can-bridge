@@ -3,3 +3,4 @@
 *.json
 workspace.code-workspace
 arduino-esp32
+log

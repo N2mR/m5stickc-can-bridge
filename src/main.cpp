@@ -48,9 +48,10 @@ void loop() {
 	{
 		// BluetoothでM5Stackに送信
 		std::string strCanData = objMonitoring->monitoringCanData();
-		if (strCanData != "")
+
+		if (!strCanData.empty())
 		{
 			SerialBT.println(strCanData.c_str());
-		}
+		}		
 	}
 }
