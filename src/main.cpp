@@ -10,26 +10,149 @@
 #define TX_PORT GPIO_NUM_32 
 #define RX_PORT GPIO_NUM_33
 
+// 制御モード
+enum class Mode {
+	Bridge,
+	Debug
+};
+// CANフレームをBLEで送信する際にQueueで管理するための構造体
+typedef struct __attribute__((packed))
+{
+	uint32_t id;
+	uint8_t dlc;
+	uint8_t data[8];
+} CanBlePacket;
+
 // Bluetooth
 BluetoothSerial SerialBT;
+// CANデータフレーム定義
 CAN_device_t CAN_cfg;
+// CAN監視クラス
 Monitoring* objMonitoring;
-uint16_t tick = 0;
+// ボタン押下ハンドラ
+TaskHandle_t buttonTaskHandle = NULL;
+// CAN通信確立の判定に使用
+static uint32_t nLastCanRxTime = 0;
+// CAN通信の確立フラグ
+bool blCanConnected = false;
 
 // プロトタイプ宣言
 bool existsCanFrame();
-std::string getCanData();
+bool getCanData(CAN_frame_t& rx_frame);
+void bleSendTask();
 
-void setup() {
-	// Initialize the M5StickC objects
+Mode enmMode;
+
+SemaphoreHandle_t modeMutex;
+
+// ボタン押下タスク
+void buttonTask(void *arg) 
+{
+	bool lastState = HIGH;
+	while (1)
+	{
+		bool currentState = digitalRead(M5_BUTTON_HOME);
+		if (lastState == HIGH && currentState == LOW)
+		{
+			xSemaphoreTake(modeMutex, portMAX_DELAY);
+			// Homeボタン押下でModeを切り替える
+			if (enmMode == Mode::Bridge)
+			{
+				enmMode = Mode::Debug;
+			} else {
+				enmMode = Mode::Bridge;
+			}
+			xSemaphoreGive(modeMutex);
+		}
+		lastState = currentState;
+		// チャタリング対策
+		vTaskDelay(pdMS_TO_TICKS(20));
+	}
+}
+
+// 実行中のモードを表示
+void drawMode(Mode mode)
+{
+	M5.Lcd.setTextSize(2);
+	M5.Lcd.setTextColor(WHITE, TFT_BLACK);
+	M5.Lcd.setCursor(2, 2);
+	
+	const char* strMode;
+	if (mode == Mode::Bridge) {
+		strMode = "Bridge";
+	} else {
+		strMode = "Debug";
+	}
+	M5.Lcd.print(strMode);
+}
+
+// 制御状態の表示
+void drawState(Mode mode)
+{
+	M5.Lcd.setTextSize(2);
+	M5.Lcd.setTextColor(GREEN, TFT_BLACK);
+
+	char message1[32];
+	char message2[32];
+	if (mode == Mode::Bridge)
+	{
+		snprintf(message1, sizeof(message1), "M5Stack: %s", (SerialBT.hasClient()) ? "OK" : "NG");
+		snprintf(message2, sizeof(message2), "CAN: %s", (blCanConnected) ? "OK" : "NG");
+	} else if (mode == Mode::Debug)
+	{
+		snprintf(message1, sizeof(message1), "M5Stack: %s", (SerialBT.hasClient()) ? "OK" : "NG");
+		snprintf(message2, sizeof(message2), "CAN: %s", (blCanConnected) ? "OK" : "NG");
+	} else 
+	{
+		// no-op
+	}
+
+	// メッセージ表示域(上段)
+	int16_t x = 1;
+	int16_t y = 30;
+	M5.Lcd.setCursor(x, y);
+	M5.Lcd.print(message1);
+	// メッセージ表示域(下段)
+	x = 1;
+	y = 60;
+	M5.Lcd.setCursor(x, y);
+	M5.Lcd.print(message2);
+}
+
+// 画面更新タスク
+void uiTask(void* arg)
+{
+	Mode lastMode = Mode::Bridge;
+	drawMode(lastMode);
+	drawState(lastMode);
+	while(1)
+	{
+		xSemaphoreTake(modeMutex, portMAX_DELAY);
+		Mode currentMode = enmMode;
+		xSemaphoreGive(modeMutex);
+
+		if (lastMode != currentMode)
+		{	
+			M5.Lcd.fillScreen(TFT_BLACK);
+			drawMode(currentMode);
+			drawState(currentMode);
+			lastMode = currentMode;
+		}
+		vTaskDelay(pdMS_TO_TICKS(50));
+	}
+} 
+
+
+
+void setup()
+{
+	M5.begin();
 	Serial.begin(9600);
 	SerialBT.begin("M5StickC");
-	M5.begin();
 
 	// 画面の向き(0, 1, 2, 3)
-	M5.Lcd.setRotation(1);	
-	// テキストサイズ(1-7)
-	M5.Lcd.setTextSize(2);
+	M5.Lcd.setRotation(1); // 横向き
+	M5.Lcd.fillScreen(TFT_BLACK);
 
 	// CanModule設定
 	CAN_cfg.speed = CAN_SPEED_500KBPS;
@@ -38,20 +161,72 @@ void setup() {
 	CAN_cfg.rx_queue = xQueueCreate(10,sizeof(CAN_frame_t));
 	ESP32Can.CANInit();
 
-	// CanModuleをMonitoringクラスに渡す
+	// CAN通信設定をMonitoringクラスに渡す
 	objMonitoring = new Monitoring(CAN_cfg);
+	// modeのmutexを作成
+	modeMutex = xSemaphoreCreateMutex();
+	// ボタン押下タスク
+	xTaskCreate(buttonTask, "buttonTask", 3072, NULL, 2, &buttonTaskHandle);
+	xTaskCreate(uiTask, "uiTask", 4096, NULL, 1, NULL);
+	
+	// デフォルトはBridgeモード
+	enmMode = Mode::Bridge;
 }
 
-void loop() {
-	tick++;
-	if (tick % 1000 == 0)
-	{
-		// BluetoothでM5Stackに送信
-		std::string strCanData = objMonitoring->monitoringCanData();
 
-		if (!strCanData.empty())
+// CANデータフレームの受信後、M5Stackに送信する
+void onCanReceive(CAN_frame_t& rx_frame)
+{
+	CanBlePacket pkt;
+	pkt.id = rx_frame.MsgID;
+	pkt.dlc = rx_frame.FIR.B.DLC;
+	memset(pkt.data, 0, sizeof(pkt.data));
+	uint8_t len = min(pkt.dlc, (uint8_t)8);
+	memcpy(pkt.data, rx_frame.data.u8, len);
+	// M5Stackへ送信
+	SerialBT.write((uint8_t*)&pkt, sizeof(pkt));
+}
+
+void loop()
+{
+    static uint32_t last = 0;
+	// 100ms周期
+    if (millis() - last >= 100)
+    {
+		last = millis();
+
+		xSemaphoreTake(modeMutex, portMAX_DELAY);
+		Mode enmCurrentMode = enmMode;
+		xSemaphoreGive(modeMutex);
+
+		switch (enmCurrentMode) 
 		{
-			SerialBT.println(strCanData.c_str());
-		}		
-	}
+			// ブリッジモード(通常)
+			case Mode::Bridge:
+				CAN_frame_t rx_frame;
+				// CANフレーム受信時
+				if (objMonitoring->getCANData(rx_frame))
+				{
+					blCanConnected = true;
+					nLastCanRxTime = millis();
+					// M5Stackに送信する
+					onCanReceive(rx_frame);
+				}
+				// 500ms以上フレームを受信できない場合は切断と判定
+				if ((millis() - nLastCanRxTime > 500))
+				{
+					blCanConnected = false;
+				}
+				
+				break;
+			// デバッグモード
+			case Mode::Debug:
+				break;
+			default:
+				// no-op
+				break;
+		}
+
+
+    }
 }
