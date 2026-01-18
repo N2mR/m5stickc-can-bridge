@@ -142,7 +142,67 @@ void uiTask(void* arg)
 	}
 } 
 
+// CANデータフレームの受信後、M5Stackに送信する
+void onCanReceive(CAN_frame_t& rx_frame)
+{
+	CanBlePacket pkt;
+	pkt.id = rx_frame.MsgID;
+	pkt.dlc = rx_frame.FIR.B.DLC;
+	memset(pkt.data, 0, sizeof(pkt.data));
+	uint8_t len = min(pkt.dlc, (uint8_t)8);
+	memcpy(pkt.data, rx_frame.data.u8, len);
+	// M5Stackへ送信
+	SerialBT.write((uint8_t*)&pkt, sizeof(pkt));
+}
 
+// Bridgeモードタスク
+void bridgeTask(void* arg)
+{
+	TickType_t last = xTaskGetTickCount();
+	while (1) 
+	{
+		xSemaphoreTake(modeMutex, portMAX_DELAY);
+		Mode enmCurrentMode = enmMode;
+		xSemaphoreGive(modeMutex);
+		// Bridgeモードのみ
+		if (enmCurrentMode == Mode::Bridge)
+		{
+			CAN_frame_t rx_frame;
+			// CANフレーム受信時
+			if (objMonitoring->getCANData(rx_frame))
+			{
+				blCanConnected = true;
+				nLastCanRxTime = millis();
+				// M5Stackに送信する
+				onCanReceive(rx_frame);
+			}
+			// 500ms以上フレームを受信できない場合は切断と判定
+			if ((millis() - nLastCanRxTime > 500))
+			{
+				blCanConnected = false;
+			}
+		}
+		vTaskDelayUntil(&last, pdMS_TO_TICKS(1));
+	}
+}
+
+void debugTask(void* arg)
+{
+	TickType_t last = xTaskGetTickCount();
+	while (1)
+	{
+		xSemaphoreTake(modeMutex, portMAX_DELAY);
+		Mode enmCurrentMode = enmMode;
+		xSemaphoreGive(modeMutex);
+
+		// Debugモードのみ
+		if (enmCurrentMode == Mode::Debug)
+		{
+			// TBD
+		}
+		vTaskDelayUntil(&last, pdMS_TO_TICKS(1));
+	}
+}
 
 void setup()
 {
@@ -165,68 +225,19 @@ void setup()
 	objMonitoring = new Monitoring(CAN_cfg);
 	// modeのmutexを作成
 	modeMutex = xSemaphoreCreateMutex();
+
+	// 画面更新タスク
+	xTaskCreate(uiTask, "uiTask", 4096, NULL, 1, NULL);
 	// ボタン押下タスク
 	xTaskCreate(buttonTask, "buttonTask", 3072, NULL, 2, &buttonTaskHandle);
-	xTaskCreate(uiTask, "uiTask", 4096, NULL, 1, NULL);
-	
+	// Bridgeタスク
+	xTaskCreate(bridgeTask, "bridgeTask", 4096, NULL, 2, NULL);
+	// Debugタスク
+	xTaskCreate(debugTask, "debugTask", 4096, NULL, 2, NULL);
 	// デフォルトはBridgeモード
 	enmMode = Mode::Bridge;
 }
 
-
-// CANデータフレームの受信後、M5Stackに送信する
-void onCanReceive(CAN_frame_t& rx_frame)
-{
-	CanBlePacket pkt;
-	pkt.id = rx_frame.MsgID;
-	pkt.dlc = rx_frame.FIR.B.DLC;
-	memset(pkt.data, 0, sizeof(pkt.data));
-	uint8_t len = min(pkt.dlc, (uint8_t)8);
-	memcpy(pkt.data, rx_frame.data.u8, len);
-	// M5Stackへ送信
-	SerialBT.write((uint8_t*)&pkt, sizeof(pkt));
-}
-
 void loop()
 {
-    static uint32_t last = 0;
-	// 100ms周期
-    if (millis() - last >= 100)
-    {
-		last = millis();
-
-		xSemaphoreTake(modeMutex, portMAX_DELAY);
-		Mode enmCurrentMode = enmMode;
-		xSemaphoreGive(modeMutex);
-
-		switch (enmCurrentMode) 
-		{
-			// ブリッジモード(通常)
-			case Mode::Bridge:
-				CAN_frame_t rx_frame;
-				// CANフレーム受信時
-				if (objMonitoring->getCANData(rx_frame))
-				{
-					blCanConnected = true;
-					nLastCanRxTime = millis();
-					// M5Stackに送信する
-					onCanReceive(rx_frame);
-				}
-				// 500ms以上フレームを受信できない場合は切断と判定
-				if ((millis() - nLastCanRxTime > 500))
-				{
-					blCanConnected = false;
-				}
-				
-				break;
-			// デバッグモード
-			case Mode::Debug:
-				break;
-			default:
-				// no-op
-				break;
-		}
-
-
-    }
 }
