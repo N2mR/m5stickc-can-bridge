@@ -5,6 +5,7 @@
 #include "BluetoothSerial.h"
 
 #include "Monitoring.h"
+#include "MockData.h"
 
 // M5StickC plusのGroveポート
 #define TX_PORT GPIO_NUM_32 
@@ -182,10 +183,23 @@ void bridgeTask(void* arg)
 				blCanConnected = false;
 			}
 		}
-		vTaskDelayUntil(&last, pdMS_TO_TICKS(1));
+		vTaskDelayUntil(&last, pdMS_TO_TICKS(5));
 	}
 }
 
+// CANデータフレームの受信後、M5Stackに送信する
+void sendMockData(uint32_t id, uint8_t dlc, uint8_t data[8])
+{
+	CanBlePacket pkt;
+	pkt.id = id;
+	pkt.dlc = dlc;
+	memset(pkt.data, 0, sizeof(pkt.data));
+	memcpy(pkt.data, data, sizeof(pkt.data));
+	// M5Stackへ送信
+	SerialBT.write((uint8_t*)&pkt, sizeof(pkt));
+}
+
+// Debugタスク
 void debugTask(void* arg)
 {
 	TickType_t last = xTaskGetTickCount();
@@ -198,9 +212,30 @@ void debugTask(void* arg)
 		// Debugモードのみ
 		if (enmCurrentMode == Mode::Debug)
 		{
-			// TBD
+			const Can256Mock *mockData256 = CanMock250_GetNext();
+			CanBlePacket pkt256;
+			pkt256.id = mockData256->id;
+			pkt256.dlc = mockData256->dlc;
+			memset(pkt256.data, 0x00, sizeof(pkt256.data));
+			memcpy(pkt256.data, mockData256->data, sizeof(pkt256.data));
+			
+			// シリアル出力
+			Serial.print("id=");
+			Serial.print(pkt256.id);
+			Serial.print("dlc=");
+			Serial.print(pkt256.dlc);
+			Serial.print("data=");
+			for (uint8_t i = 0; i < sizeof(pkt256.data); i++)
+			{
+				if (pkt256.data[i] < 16) Serial.print("0");
+				Serial.print(pkt256.data[i], HEX);
+			}
+			Serial.println();
+
+			// M5Stackへ送信
+			SerialBT.write((uint8_t*)&pkt256, sizeof(pkt256));
 		}
-		vTaskDelayUntil(&last, pdMS_TO_TICKS(1));
+		vTaskDelayUntil(&last, pdMS_TO_TICKS(5));
 	}
 }
 
