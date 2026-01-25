@@ -16,9 +16,12 @@ enum class Mode {
 	Bridge,
 	Debug
 };
+// CANフレームの同期用
+#define CAN_PKT_MAGIC 0xA5
 // CANフレームをBLEで送信する際にQueueで管理するための構造体
 typedef struct __attribute__((packed))
 {
+	uint8_t magic;
 	uint32_t id;
 	uint8_t dlc;
 	uint8_t data[8];
@@ -147,6 +150,7 @@ void uiTask(void* arg)
 void onCanReceive(CAN_frame_t& rx_frame)
 {
 	CanBlePacket pkt;
+	pkt.magic = CAN_PKT_MAGIC;
 	pkt.id = rx_frame.MsgID;
 	pkt.dlc = rx_frame.FIR.B.DLC;
 	memset(pkt.data, 0, sizeof(pkt.data));
@@ -191,6 +195,7 @@ void bridgeTask(void* arg)
 void sendMockData(uint32_t id, uint8_t dlc, uint8_t data[8])
 {
 	CanBlePacket pkt;
+	pkt.magic = CAN_PKT_MAGIC;
 	pkt.id = id;
 	pkt.dlc = dlc;
 	memset(pkt.data, 0, sizeof(pkt.data));
@@ -214,6 +219,7 @@ void debugTask(void* arg)
 		{
 			const Can256Mock *mockData256 = CanMock250_GetNext();
 			CanBlePacket pkt256;
+			pkt256.magic = CAN_PKT_MAGIC;
 			pkt256.id = mockData256->id;
 			pkt256.dlc = mockData256->dlc;
 			memset(pkt256.data, 0x00, sizeof(pkt256.data));
